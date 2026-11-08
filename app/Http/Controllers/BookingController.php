@@ -1,55 +1,69 @@
 <?php
-
+declare(strict_types=1);
 namespace App\Http\Controllers;
 
 use App\Models\Booking;
 use App\Models\Room;
-use Carbon\Carbon;
+use App\Service\BookingService;
+use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Pagination\LengthAwarePaginator;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
+use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Log;
 
 class BookingController extends Controller
 {
-    public function index(Request $request)
+    private int $userId;
+
+    public function __construct(
+        private readonly BookingService $bookingService,
+        private Authenticatable $user,
+    ) {
+        $this->user = Auth::user();
+        $this->userId = $this->user->getAttributes()['id'];
+    }
+    public function index(Request $request): LengthAwarePaginator
     {
-        return Booking::where('user_id', $request->user()->id)
+        return Booking::where('user_id', $this->userId)
             ->orderByRaw('starts_at DESC')
             ->paginate(20);
     }
 
-    public function store(Request $request)
+    public function store(Request $request): JsonResponse
     {
-        $conflict = DB::select("SELECT id FROM bookings
-            WHERE room_id = {$request->room_id}
-            AND starts_at <= '{$request->ends_at}'
-            AND ends_at >= '{$request->starts_at}'");
+        $data = $request->validate([
+            'room_id' => ['required', 'integer', 'exists:rooms,id'],
+            'title' => ['required', 'string'],
+            'starts_at' => ['required', 'date'],
+            'ends_at' => ['required', 'date'],
+        ]);
 
-        if ($conflict) {
-            return response()->json(['error' => 'Комната занята'], 409);
-        }
+        $booking = $this->bookingService->create(
+            (int) $data['room_id'],
+            $data['title'],
+            $this->userId,
+            $data['starts_at'],
+            $data['ends_at']
+        );
 
-        $start = Carbon::parse($request->starts_at);
-        if ($start->hour < 9 || $start->hour >= 20) {
-            return response()->json(['error' => 'Нерабочее время'], 422);
-        }
+        Log::channel('bookings')->info('Booking created', [
+            'booking_id' => $booking->id,
+            'user_id' => $this->userId,
+        ]);
 
-        $booking = Booking::create($request->all());
-
-        Log::withContext(['booking_id' => $booking->id]);
-        Log::channel('bookings')->info('Booking created');
-
-        return $booking;
+        return response()->json($booking, 201);
     }
 
-    public function destroy($id)
+    public function destroy(Request $request, int $id): Response
     {
-        Booking::findOrFail($id)->delete();
+        $this->bookingService->delete($id, $this->userId);
 
         return response()->noContent();
     }
 
-    public function today(Room $room)
+    public function today(Room $room): JsonResponse
     {
         return $room->bookings()
             ->whereDate('starts_at', today())
